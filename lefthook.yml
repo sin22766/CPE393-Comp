@@ -1,0 +1,41 @@
+# lefthook.yml
+pre-commit:
+  parallel: true
+  commands:
+    jupytext-conversion:
+      glob: "*.ipynb"
+      run: |
+        # Skip files in .ipynb_checkpoints directories
+        if [[ "{filepath}" == *".ipynb_checkpoints"* ]]; then
+          exit 0
+        fi
+        
+        # Convert notebook to Python script
+        jupytext --to py:percent "{filepath}"
+        
+        # If conversion was successful, stage the Python file
+        py_file="${{filepath%.ipynb}}.py"
+        if [ -f "$py_file" ]; then
+          git add "$py_file"
+          echo "✅ Converted {filepath} to $py_file and staged it"
+        else
+          echo "❌ Failed to convert {filepath}"
+          exit 1
+        fi
+
+# Optional: Add a post-checkout hook to sync .py files with .ipynb
+post-checkout:
+  commands:
+    sync-ipynb-changes:
+      run: |
+        # Identify .py files that were changed in the checkout
+        changed_py_files=$(git diff --name-only HEAD@{1} HEAD | grep '\.py$')
+        
+        # For each changed .py file, check if a corresponding .ipynb exists and sync
+        for py_file in $changed_py_files; do
+          ipynb_file="${py_file%.py}.ipynb"
+          if [ -f "$ipynb_file" ]; then
+            jupytext --sync "$py_file"
+            echo "Synced changes from $py_file to $ipynb_file"
+          fi
+        done
