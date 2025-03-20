@@ -1,2 +1,18 @@
+[project]
+name = "cpe393-comp"
+version = "0.1.0"
+description = "Kaggle Community Olympiad-CPE393-2025"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "catboost>=1.2.7",
+    "dython>=0.7.9",
+    "imbalanced-learn>=0.13.0",
+    "ipykernel>=6.29.5",
+    "optuna>=4.2.1",
+    "pandas>=2.2.3",
+    "scikit-learn>=1.6.1",
+    "seaborn>=0.13.2",
+]
 [tool.ruff]
 line-length = 100
