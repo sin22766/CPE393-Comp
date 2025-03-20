@@ -1,2 +1,8 @@
 .venv/
 submission.csv
+
+mlruns/
+mlartifacts/
+outputs/
+mlruns.db
+**/basic_auth.db

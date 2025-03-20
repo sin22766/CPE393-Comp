@@ -9,6 +9,7 @@ dependencies = [
     "dython>=0.7.9",
     "imbalanced-learn>=0.13.0",
     "ipykernel>=6.29.5",
+    "jupytext>=1.16.7",
     "optuna>=4.2.1",
     "pandas>=2.2.3",
     "scikit-learn>=1.6.1",

@@ -22,18 +22,10 @@
 # %%
 import pandas as pd
 import numpy as np
-from sklearn.experimental import enable_iterative_imputer
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.impute import IterativeImputer
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.tree import DecisionTreeClassifier
 from sklearn.model_selection import train_test_split
-from catboost import CatBoostClassifier, Pool
-import optuna
-from sklearn.metrics import (
-    roc_auc_score,
-    accuracy_score,
-    f1_score,
-    classification_report,
-)
 import matplotlib.pyplot as plt
 import seaborn as sns
 
@@ -138,7 +130,7 @@ def preprocess_X(raw_data, random_seed=0):
 
     # Impute categorical features
     cat_imputer = IterativeImputer(
-        estimator=RandomForestClassifier(), max_iter=10, random_state=random_seed
+        estimator=DecisionTreeClassifier(), max_iter=10, random_state=random_seed
     )
     cat_imputer.set_output(transform="pandas")
     filled_categorical = cat_imputer.fit_transform(categorical_data).astype(np.int8)
@@ -213,79 +205,179 @@ y_train.value_counts()
 #
 
 # %%
-num_cols = raw_train.drop(["Status", "id"], axis=1).select_dtypes(include=["number"]).columns
+from scipy.stats.mstats import winsorize
+from sklearn.preprocessing import PowerTransformer, StandardScaler
 
-fig, ax = plt.subplots(4, 3, figsize=(15, 15))
+def preprocess_num_data(num_data: pd.DataFrame, plot: bool = False) -> pd.DataFrame:
+    """
+    Preprocess numerical data by scaling it.
 
-for i, col in enumerate(num_cols):
-    sns.histplot(X_train[col], ax=ax[i // 3, i % 3])
+    Parameters:
+    -----------
+    num_data : pd.DataFrame
+        The numerical data to preprocess
+
+    Returns:
+    --------
+    pd.DataFrame: preprocessed numerical data
+    """
+
+
+    num_data = num_data.copy()
+    num_cols = num_data.columns
+    
+    def data_ploter(data, title):
+        if not plot:
+            return
+
+        fig, ax = plt.subplots(4, 3, figsize=(15, 15))
+        fig.suptitle(title)
+        fig.tight_layout(pad=3.0)
+        for i, col in enumerate(num_cols):
+            sns.histplot(data[col], ax=ax[i // 3, i % 3])
+    
+    def get_skewed_cols(data):
+        num_skew_abs = data.skew().abs().sort_values(ascending=False)
+        skewed_cols = num_skew_abs[num_skew_abs > 0.5].index
+        return skewed_cols
+    
+    data_ploter(num_data, "Before Scaling")
+
+    # Scale the data
+    skewed_cols = get_skewed_cols(num_data)
+    num_data[skewed_cols] = num_data[skewed_cols].apply(lambda x: winsorize(x, limits=0.01))
+
+    data_ploter(num_data, "After Winsorizing")
+
+    skewed_cols = get_skewed_cols(num_data)
+    pt = PowerTransformer()
+    pt.set_output(transform="pandas")
+    num_data[skewed_cols] = pt.fit_transform(num_data[skewed_cols])
+
+    ss = StandardScaler()
+    ss.set_output(transform="pandas")
+    num_data = ss.fit_transform(num_data)
+
+    data_ploter(num_data, "After Power Transforming & Standard Scaling")
+
+    return num_data    
 
 # %%
-X_train[num_cols].describe().T
+num_cols = raw_train.drop(["Status", "id"], axis=1).select_dtypes(include=["number"]).columns
+
+X_scaled_train = X_train.copy()
+X_scaled_train[num_cols] = preprocess_num_data(X_train[num_cols])
+X_scaled_train[num_cols]
 
 # %%
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import log_loss
 from sklearn.model_selection import RepeatedStratifiedKFold
 from imblearn.over_sampling import SMOTE
+import optuna
 
-rskf = RepeatedStratifiedKFold(n_splits=5, n_repeats=2, random_state=RANDOM_SEED)
+# %%
+X_scaled_val = X_val.copy()
+X_scaled_val[num_cols] = preprocess_num_data(X_scaled_val[num_cols])
 
 
 # %%
 def objective(trial):
     # Define the hyperparameters to optimize
     params = {
-        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        'n_estimators': trial.suggest_int('n_estimators', 50, 500),
-        'max_depth': trial.suggest_int('max_depth', 2, 8),
-        'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
-        'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 10),
-        'subsample': trial.suggest_float('subsample', 0.6, 1.0),
-        'max_features': trial.suggest_categorical('max_features', ['sqrt', 'log2', None]),
+        # Search around the current learning rate (±50%)
+        "learning_rate": trial.suggest_float(
+            "learning_rate", 0.047831988317386595 * 0.5, 0.047831988317386595 * 1.5, log=True
+        ),
+        # Search around current n_estimators with some flexibility
+        "n_estimators": trial.suggest_int("n_estimators", max(100, 468 - 100), 468 + 100),
+        # Search depth around current value
+        "max_depth": trial.suggest_int("max_depth", 3, 5),
+        # Try different feature selection strategies but include current
+        "max_features": trial.suggest_categorical("max_features", ["sqrt", "log2", None]),
+        # Search around current min_samples_leaf
+        "min_samples_leaf": trial.suggest_int("min_samples_leaf", max(1, 10 - 5), 10 + 5),
+        # Search around current min_samples_split
+        "min_samples_split": trial.suggest_int("min_samples_split", max(2, 12 - 6), 12 + 6),
+        # Search around current subsample rate
+        "subsample": trial.suggest_float(
+            "subsample", max(0.5, 0.6763658784493454 - 0.15), min(1.0, 0.6763658784493454 + 0.15)
+        ),
+        "random_state": RANDOM_SEED,
     }
-    
-    # Create and train the model with the suggested hyperparameters
-    model = GradientBoostingClassifier(**params, random_state=42)
-    model.fit(X_train, y_train)
-    
-    # Make predictions on test data
-    y_pred_proba = model.predict_proba(X_val)
-    
-    # Calculate multiclass log loss on test data
-    # Note: lower log loss is better, but Optuna minimizes by default
-    test_loss = log_loss(y_val, y_pred_proba, labels=model.classes_)
-    
-    # Return the test loss (Optuna will minimize this)
-    return test_loss
+
+    model = GradientBoostingClassifier(**params)
+
+    X_train_fold = X_train
+    y_train_fold = y_train
+
+    use_smote = trial.suggest_categorical("use_smote", [True, False])
+    if use_smote:
+        smote = SMOTE(random_state=RANDOM_SEED)
+        X_train_fold, y_train_fold = smote.fit_resample(X_train_fold, y_train_fold)
+
+    # Fit the model
+    model.fit(X_train_fold, y_train_fold)
+
+    # Predict and calculate loss
+    y_pred_val = model.predict_proba(X_scaled_val)
+    val_loss = log_loss(y_val, y_pred_val)
+
+    # Return the mean validation loss
+    return val_loss
 
 
-# %%
-print("Starting Optuna optimization...")
-study = optuna.create_study(direction='minimize')  # Minimize log loss
-study.optimize(objective, n_trials=100)  # 100 trials for thorough search
-
-# %%
-best_params = study.best_params
-
-final_model = GradientBoostingClassifier(**best_params, random_state=RANDOM_SEED)
-final_model.fit(X_train, y_train)
-
-# %%
-y_pred_proba = final_model.predict_proba(X_val)
-y_pred = final_model.predict(X_val)
-
-final_test_loss = log_loss(y_val, y_pred_proba, labels=final_model.classes_)
-print(f"\nFinal Test Log Loss: {final_test_loss:.4f}")
+# Create a study object and optimize the objective function
+study = optuna.create_study(direction="minimize")
+study.optimize(objective, n_trials=100)
 
 # %%
-plt.figure(figsize=(10, 6))
-optimization_history = optuna.visualization.matplotlib.plot_optimization_history(study)
-plt.title('Optimization History')
+rskf = RepeatedStratifiedKFold(n_splits=5, n_repeats=2, random_state=RANDOM_SEED)
+model = GradientBoostingClassifier(
+    learning_rate=0.047831988317386595,
+    max_depth=4,
+    max_features="log2",
+    min_samples_leaf=10,
+    min_samples_split=12,
+    n_estimators=468,
+    subsample=0.6763658784493454,
+    random_state=RANDOM_SEED,
+)
+
+# %%
+import os
+
+if os.name == 'nt':
+    os.environ['LOKY_MAX_CPU_COUNT'] = "6"
+
+# %%
+train_loss = []
+val_loss = []
+
+for train_index, val_index in rskf.split(X_scaled_train, y_train):
+    X_train_fold, X_val_fold = X_scaled_train.iloc[train_index], X_scaled_train.iloc[val_index]
+    y_train_fold, y_val_fold = y_train.iloc[train_index], y_train.iloc[val_index]
+
+    smote = SMOTE(random_state=RANDOM_SEED)
+    X_train_resampled, y_train_resampled = smote.fit_resample(X_train_fold, y_train_fold)
+
+    model.fit(X_train_fold, y_train_fold)
+
+    y_pred_train = model.predict_proba(X_train_fold)
+    y_pred_val = model.predict_proba(X_val_fold)
+
+    train_loss.append(log_loss(y_train_fold, y_pred_train))
+    val_loss.append(log_loss(y_val_fold, y_pred_val))
+
+# %%
+cv_loss = pd.DataFrame({"train_loss": train_loss, "val_loss": val_loss})
+cv_loss
+
+sns.lineplot(data=cv_loss)
 
 # %%
 feature_imp = pd.Series(
-    final_model.feature_importances_, index=X_train.columns, name="feature_importance"
+    model.feature_importances_, index=X_train.columns, name="feature_importance"
 ).sort_values(ascending=False)
 sns.barplot(x=feature_imp, y=feature_imp.index)
 plt.xlabel("Feature Importance")
@@ -295,9 +387,12 @@ plt.ylabel("Features");
 # ## Testing on Test dataset
 
 # %%
-test_proba = final_model.predict_proba(X_val)
-test_loss = log_loss(y_val, test_proba)
-test_loss
+X_scaled_val = X_val.copy()
+X_scaled_val[num_cols] = preprocess_num_data(X_scaled_val[num_cols])
+
+# %%
+y_pred_val = model.predict_proba(X_scaled_val)
+log_loss(y_val, y_pred_val)
 
 # %% [markdown]
 # ## Predicting on real validation set
@@ -310,7 +405,13 @@ X_test = preprocess_X(raw_test, random_seed=RANDOM_SEED)
 X_test
 
 # %%
-submit_pred = final_model.predict_proba(X_test)
+X_scaled_test = X_test.copy()
+X_scaled_test[num_cols] = preprocess_num_data(X_scaled_test[num_cols])
+
+# %%
+submit_pred = model.predict_proba(X_scaled_test)
+# Reorder the columns from {"D": 0, "C": 1, "CL": 2} to {"C": 0, "CL": 1, "D": 2}
+submit_pred = submit_pred[:, [1, 2, 0]]
 submit_pred = pd.DataFrame(submit_pred, columns=["Status_C", "Status_CL", "Status_D"])
 submit_pred = pd.concat([raw_test["id"], submit_pred], axis=1)
 submit_pred
